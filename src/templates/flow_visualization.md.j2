@@ -1,0 +1,212 @@
+# Flow Visualization: {{ project_key }}
+
+## Overview
+
+This document contains a complete visualization of the Dataiku project flow.
+
+### Statistics
+
+| Metric | Count |
+|--------|-------|
+| **Total Datasets** | {{ stats.total_datasets }} |
+| **Total Recipes** | {{ stats.total_recipes }} |
+| **Total Managed Folders** | {{ stats.total_managed_folders }} |
+| **Root Datasets** (source data) | {{ stats.root_datasets }} |
+| **Intermediate Datasets** | {{ stats.intermediate_datasets }} |
+| **Leaf Datasets** (final outputs) | {{ stats.leaf_datasets }} |
+| **Orphaned Datasets** (unused) | {{ stats.orphaned_datasets }} |
+| **Dependency Phases** | {{ stats.total_phases }} |
+{% if config.highlight_vertical_sections and stats.vertical_sections > 0 %}
+| **Compressible Vertical Sections** 🔄 | {{ stats.vertical_sections }} |
+| **Recipes in Vertical Sections** | {{ stats.recipes_in_sections }} |
+| **Boundary Recipes** (excluded) | {{ stats.boundary_recipes }} |
+{% endif %}
+
+### Project Variables
+
+#### Global Variables
+
+{% if project_variables %}
+```json
+{{ project_variables | tojson(indent=2) }}
+```
+{% else %}
+No project variables defined.
+{% endif %}
+
+#### Local Variables
+
+{% if local_variables %}
+```json
+{{ local_variables | tojson(indent=2) }}
+```
+{% else %}
+No local variables defined.
+{% endif %}
+
+### Managed Folders
+
+{% if managed_folders %}
+Managed folders are file storage locations that contain files such as models, configurations, or other artifacts.
+
+{% for folder in managed_folders %}
+**`{{ folder.name }}`** ({{ folder.type }})
+- **ID**: `{{ folder.id }}`
+- **Storage Connection**: `{{ folder.storage_bucket }}`
+- **Path**: `{{ folder.path }}`
+- **Files**: {{ folder.length }}{% if folder.length > 0 %} ({% for file in folder.files[:5] %}`{{ file }}`{% if not loop.last %}, {% endif %}{% endfor %}{% if folder.length > 5 %}, ... and {{ folder.length - 5 }} more{% endif %}){% endif %}
+
+{% endfor %}
+{% else %}
+No managed folders in this project.
+{% endif %}
+
+### Root Datasets (Source Data)
+
+These datasets are the starting points of the flow. They are not produced by any recipe and are actively used in the flow (not orphaned).
+
+{% for dataset in root_datasets %}
+{%- set db = dataset.database if dataset.database else '?' -%}
+{%- set schema = dataset.schema if dataset.schema else '?' -%}
+{%- set table_parts = dataset.source_table.split('.') if dataset.source_table else ['?'] -%}
+{%- if table_parts|length == 2 -%}
+  {%- set table = table_parts[1] -%}
+{%- elif table_parts|length == 1 -%}
+  {%- set table = table_parts[0] -%}
+{%- else -%}
+  {%- set table = '?' -%}
+{%- endif -%}
+**`{{ dataset.id }}`**{% if dataset.source_table %} → `{{ db }}.{{ schema }}.{{ table }}`{% endif %}{% if dataset.columns %} ({{ dataset.columns|length }} columns){% endif %}
+{% if config.show_dataset_columns and dataset.columns %}
+{%- for col in dataset.columns[:config.max_columns_display] %}
+- `{{ col.name }}` ({{ col.type }})
+{% endfor -%}
+{% if dataset.columns|length > config.max_columns_display -%}
+- ... and {{ dataset.columns|length - config.max_columns_display }} more
+{% endif -%}
+{% endif %}
+
+{% endfor %}
+
+### Leaf Datasets (Final Outputs)
+
+These datasets are the end points of the flow. They are not consumed by any recipe.
+
+{% for dataset in leaf_datasets -%}
+- `{{ dataset.id }}`
+{% endfor %}
+
+{% if config.include_orphaned and orphaned_datasets %}
+### Orphaned Datasets
+
+These datasets are not used in the flow (neither as inputs nor outputs to any recipe).
+
+{% for dataset in orphaned_datasets -%}
+- `{{ dataset.id }}` ⚠️
+{% endfor %}
+{% endif %}
+
+{% if config.highlight_vertical_sections and vertical_sections %}
+### Compressible Vertical Sections 🔄
+
+These sections represent linear chains of recipes that can potentially be compressed into single operations to reduce complexity and improve performance.
+
+A **compressible vertical section**:
+- **STARTS** at a recipe (which may have multiple inputs)
+- **CONTINUES** through recipes where each has exactly one output consumed by exactly one downstream recipe
+- **STOPS** before encountering another recipe with multiple inputs (boundary recipe, excluded)
+
+{% for section in vertical_sections %}
+#### Vertical Section {{ loop.index }}
+
+This section contains **{{ section | length }} recipe(s)** that can be compressed:
+
+{% for recipe_id in section -%}
+{{ loop.index }}. `{{ recipe_id }}`{% if loop.first %} ⭐ (START){% endif %}
+{% endfor %}
+
+{% endfor %}
+
+**Color Legend for Diagram:**
+- 🟠 **Orange with thick border**: Recipes in compressible vertical sections
+- 🔴 **Red with thick border**: Boundary recipes (excluded from compression - have multiple inputs)
+
+For more details on vertical section compression, see `vertical_section_compression_example.md`.
+
+{% endif %}
+
+## Recipes by Dependency Phase
+
+This section organizes recipes by their dependency phases. Recipes in Phase N can only be executed after all recipes in Phase N-1 have been completed. This is useful for building out the project incrementally from the ground up.
+
+**Build Strategy**: Start with Phase 1 recipes that work directly with root data sources, then proceed sequentially through each phase. Each phase builds upon the outputs of previous phases.
+
+### Phase Summary
+
+| Phase | Recipe Count |
+|-------|--------------|
+{% for phase_num in recipes_by_phase.keys() | sort -%}
+| {{ phase_num }} | {{ recipes_by_phase[phase_num] | length }} |
+{% endfor -%}
+| **Total** | **{{ stats.total_recipes }}** |
+
+{% for phase_num in recipes_by_phase.keys() | sort %}
+### Phase {{ phase_num }}
+
+{% if phase_num == 1 -%}
+These recipes consume only root datasets (source data). They can be built first since they have no dependencies on other recipes.
+{%- else -%}
+These recipes depend on outputs from Phase {{ phase_num - 1 }} and earlier. They can be built once all previous phases are complete.
+{%- endif %}
+
+**Recipes in this phase ({{ recipes_by_phase[phase_num] | length }}):**
+
+{% for recipe in recipes_by_phase[phase_num] -%}
+- **`{{ recipe.id }}`**{% if config.show_recipe_type and recipe.type %} ({{ recipe.type.value }}){% endif %}
+  - Inputs: {% for input_ds in recipe.inputs %}{% if loop.index0 > 0 %}, {% endif %}`{{ input_ds.id }}`{% else %}(none){% endfor %}
+  - Outputs: {% for output_ds in recipe.outputs %}{% if loop.index0 > 0 %}, {% endif %}`{{ output_ds.id }}`{% else %}(none){% endfor %}
+
+{% endfor %}
+{% endfor %}
+
+## Complete Flow Diagram
+
+The diagram below shows the project flow from source data through transformations to final outputs. For clarity, only **root datasets** (sources), **leaf datasets** (outputs), and **all recipes** are shown. Intermediate datasets are omitted to reduce visual complexity - the flow is still complete through the recipe connections.
+
+### Legend
+
+- 📊 **SOURCE** <span style="display:inline-block;width:12px;height:12px;background-color:{{ config.root_color }};border:1px solid #666;"></span>: Root datasets - uploaded/external source data
+- 🎯 **OUTPUT** <span style="display:inline-block;width:12px;height:12px;background-color:{{ config.leaf_color }};border:1px solid #666;"></span>: Leaf datasets - final results
+{% if config.include_orphaned -%}
+- 🏝️ **ORPHANED** <span style="display:inline-block;width:12px;height:12px;background-color:{{ config.orphaned_color }};border:1px solid #666;"></span>: Orphaned datasets - not used in flow
+{% endif -%}
+- 📁 **STORAGE** <span style="display:inline-block;width:12px;height:12px;background-color:#DDA0DD;border:1px solid #666;"></span>: Managed folders - file storage for models/artifacts
+- ⚙️ **RECIPE** <span style="display:inline-block;width:12px;height:12px;background-color:{{ config.recipe_color }};border:1px solid #666;"></span>: Recipes - data transformations
+{% if config.highlight_vertical_sections and stats.vertical_sections > 0 -%}
+- 🔄 **VERTICAL SECTION** <span style="display:inline-block;width:12px;height:12px;background-color:{{ config.vertical_section_color }};border:3px solid #FF4500;"></span>: Recipes in compressible vertical sections{% if config.use_subgraphs_for_sections %} (grouped with dotted border){% endif %}
+- 🛑 **BOUNDARY** <span style="display:inline-block;width:12px;height:12px;background-color:{{ config.boundary_recipe_color }};border:3px solid #8B0000;"></span>: Boundary recipes (excluded from compression)
+{% endif %}
+
+**Note**: Intermediate datasets ({{ stats.intermediate_datasets }}) are not shown in the diagram but are listed in the statistics above. The recipe chain still shows the complete transformation flow.
+
+{{ mermaid_diagram }}
+
+## Full List of Scenarios and Steps
+
+This section provides a complete listing of all scenarios and their steps in YAML format. Each scenario contains one or more steps that execute sequentially.
+
+### Finding Custom Python and SQL Code
+
+Custom Python and SQL code from scenario steps can be found in the `vertex_pipelines/components/operational` folder after running the pipeline generation command (`uv run generate-pipelines`). The files are named using the pattern:
+- `scenario_{scenario_id}_step_{step_number}.py` for Python scripts
+- `scenario_{scenario_id}_step_{step_number}.sql` for SQL scripts
+
+### Scenario Details (YAML)
+
+```yaml
+{{ scenario_yaml_data | to_yaml }}
+```
+
+---
+
+*Generated by Dataiku Bundle SDK*

@@ -1,0 +1,14 @@
+"""
+Custom Python Component: {{ component_name }}
+Generated from Dataiku scenario: {{ scenario_id }}
+Description: {{ description }}
+"""
+
+from kfp import dsl
+
+
+@dsl.component()
+def {{ component_name }}() -> None:
+    """{{ description }}"""
+    # Original Dataiku custom_python scenario code
+{{ script | indent(4, first=True) }}

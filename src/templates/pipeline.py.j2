@@ -1,0 +1,116 @@
+"""
+{{ scenario_description }}
+
+Generated from Dataiku scenario: {{ scenario_id }}
+
+Root datasets (from Snowflake):
+{%- for root in root_datasets %}
+  - {{ root }}
+{%- endfor %}
+
+Final outputs:
+{%- for target in target_datasets %}
+  - {{ target }}
+{%- endfor %}
+"""
+from kfp import dsl, compiler
+from kfp.dsl import PipelineTask
+
+# Import recipe components
+{%- for component in all_components %}
+{%- if component.type == 'source' %}
+from vertex_pipelines.components.recipes.{{ component.id|sanitize_component }} import {{ component.id|sanitize_component }}
+{%- elif component.type == 'recipe' %}
+from vertex_pipelines.components.recipes.{{ component.id|sanitize_component }} import {{ component.id|sanitize_component }}
+{%- elif component.type == 'operational' and component.step_type == 'custom_python' %}
+from vertex_pipelines.components.operational.{{ component.id|sanitize_component }} import {{ component.id|sanitize_component }}
+{%- endif %}
+{%- endfor %}
+
+
+@dsl.pipeline(
+    name="{{ function_name }}",
+    description="{{ scenario_description }}"
+)
+def {{ function_name }}_pipeline() -> None:
+    """
+    Kubeflow pipeline generated from Dataiku scenario: {{ scenario_id }}
+
+    This pipeline replicates the Dataiku flow where each dataset is produced
+    by a recipe component. Task names match dataset names for clarity.
+    """
+{%- if managed_folder_ids %}
+    
+    # Managed folder GCS paths
+    # TODO: Update these paths to match your actual GCS bucket locations
+{%- for managed_folder_id in managed_folder_ids %}
+    managed_folder_{{ managed_folder_id }}_path = "gs://YOUR-BUCKET/path/to/{{ managed_folder_id }}/"
+{%- endfor %}
+{%- endif %}
+{%- set has_components = namespace(value=false) %}
+{%- for step in steps %}
+{%- if step.components %}
+{%- set has_components.value = true %}
+{%- endif %}
+{%- endfor %}
+{%- if not has_components.value %}
+
+    # Placeholder task - this scenario has no implemented components yet
+    @dsl.component(base_image="python:3.11-slim")
+    def placeholder_task() -> None:
+        """Placeholder task for scenario: {{ scenario_id }}"""
+        print("Scenario {{ scenario_id }} has no implemented components yet")
+        print("This is a placeholder to allow the pipeline to compile")
+
+    placeholder = placeholder_task()
+{%- else %}
+{%- set ns = namespace(dataset_vars={}, root_datasets_set=root_datasets|list) %}
+{%- for step in steps %}
+{%- for component in step.components %}
+{%- if component.type == 'source' %}
+
+    # Source dataset: {{ component.outputs[0] }}
+    {{ component.outputs[0]|sanitize }}: PipelineTask = {{ component.id|sanitize_component }}()
+{%- do ns.dataset_vars.update({component.outputs[0]: component.outputs[0]|sanitize ~ '.output'}) %}
+{%- elif component.type == 'recipe' %}
+{%- set primary_output = component.outputs[0]|sanitize if component.outputs else 'result' %}
+
+    # Recipe: {{ component.id }}
+    # Transform: {{ component.inputs|join(', ') }} → {{ component.outputs|join(', ') }}
+    {{ primary_output }} = {{ component.id|sanitize_component }}(
+{%- for input_ds in component.inputs %}
+{%- if input_ds not in ns.root_datasets_set and input_ds in ns.dataset_vars %}
+        {{ input_ds|sanitize }}={{ ns.dataset_vars[input_ds] }},
+{%- endif %}
+{%- endfor %}
+{%- for managed_folder_id in component.managed_folder_inputs %}
+        managed_folder_{{ managed_folder_id }}_path=managed_folder_{{ managed_folder_id }}_path,
+{%- endfor %}
+    )
+{%- if component.outputs|length == 1 %}
+{%- do ns.dataset_vars.update({component.outputs[0]: primary_output ~ '.output'}) %}
+{%- else %}
+{%- for output_ds in component.outputs %}
+{%- do ns.dataset_vars.update({output_ds: primary_output ~ '.outputs["' ~ output_ds|sanitize ~ '"]'}) %}
+{%- endfor %}
+{%- endif %}
+{%- elif component.type == 'operational' and component.step_type == 'custom_python' %}
+
+    # Custom Python step: {{ component.description }}
+    {{ component.id|sanitize_component }}_task = {{ component.id|sanitize_component }}()
+{%- endif %}
+{%- endfor %}
+{%- endfor %}
+{%- endif %}
+
+
+if __name__ == "__main__":
+    # Compile the pipeline to YAML
+    compiler.Compiler().compile(
+        pipeline_func={{ function_name }}_pipeline,
+        package_path="{{ scenario_id }}.yaml"
+    )
+    print(f"✅ Pipeline compiled to: {{ scenario_id }}.yaml")
+    print(f"   - Root datasets: {{ root_datasets|length }}")
+    print(f"   - Total components: {{ all_components|length }}")
+    print(f"   - Target datasets: {{ target_datasets|length }}")
